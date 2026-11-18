@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#20261f">
+  <title>Projet Hub</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <div class="window-titlebar">
+    <div class="window-titlebar-brand">Projet Hub</div>
+  </div>
+  <aside class="sidebar" id="sidebar"></aside>
+  <div class="workspace">
+    <header class="topbar" id="topbar"></header>
+    <main id="main"></main>
+  </div>
+  <dialog id="dialog" aria-labelledby="dialog-title">
+    <form id="form">
+      <div class="dialog-heading"><h2 id="dialog-title"></h2><button type="button" class="icon-button" data-action="close" aria-label="Fermer">×</button></div>
+      <div id="fields"></div>
+      <p id="form-error" role="alert" hidden></p>
+      <div class="form-actions"><button type="button" class="button secondary" data-action="close">Annuler</button><button class="button primary" id="submit">Enregistrer</button></div>
+    </form>
+  </dialog>
+  <div class="toast" id="toast" role="status" hidden></div>
+</body>
+</html>

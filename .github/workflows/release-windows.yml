@@ -1,0 +1,54 @@
+name: Publier Projet Hub pour Windows
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    env:
+      RELEASE_REPOSITORY: ${{ vars.RELEASE_REPOSITORY }}
+      REPOSITORY_IS_PRIVATE: ${{ github.event.repository.private }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - name: Vérifier le dépôt et la version
+        shell: pwsh
+        run: |
+          if ($env:RELEASE_REPOSITORY -cne $env:GITHUB_REPOSITORY -or $env:REPOSITORY_IS_PRIVATE -ne 'false') {
+            throw 'Configurez RELEASE_REPOSITORY avec le nom complet de ce dépôt GitHub public.'
+          }
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          if ($version -notmatch '^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$' -or $env:GITHUB_REF_NAME -cne "v$version") {
+            throw 'Le tag doit être vMAJEUR.MINEUR.CORRECTIF et correspondre à la version de package.json.'
+          }
+          "RELEASE_VERSION=$version" >> $env:GITHUB_ENV
+      - run: npm ci
+      - name: Générer l’installateur et les métadonnées de mise à jour
+        shell: pwsh
+        run: |
+          $owner, $repo = $env:RELEASE_REPOSITORY -split '/', 2
+          npm run build:win -- --x64 --config.win.publish.provider=github "--config.win.publish.owner=$owner" "--config.win.publish.repo=$repo" '--config.artifactName=Projet-Hub-Setup-${version}.${ext}'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $setup = "dist/Projet-Hub-Setup-$env:RELEASE_VERSION.exe"
+          foreach ($file in @($setup, "$setup.blockmap", 'dist/latest.yml', 'dist/win-unpacked/resources/app-update.yml')) {
+            if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw "Fichier de publication manquant : $file" }
+          }
+      - name: Publier la version stable sur GitHub Releases
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $setup = "dist/Projet-Hub-Setup-$env:RELEASE_VERSION.exe"
+          gh release create "$env:GITHUB_REF_NAME" "$setup" "$setup.blockmap" dist/latest.yml --repo "$env:RELEASE_REPOSITORY" --verify-tag --generate-notes --title "Projet Hub $env:RELEASE_VERSION"
+          exit $LASTEXITCODE

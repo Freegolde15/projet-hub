@@ -1,0 +1,27 @@
+{
+  "name": "projet-hub",
+  "productName": "Projet Hub",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Application locale de gestion de projets",
+  "main": "desktop/main.cjs",
+  "scripts": {
+    "start": "node server.cjs",
+    "desktop": "electron .",
+    "build:win": "electron-builder --win nsis --publish never"
+  },
+  "dependencies": {
+    "electron-updater": "6.8.9"
+  },
+  "devDependencies": {
+    "electron": "45.3.4",
+    "electron-builder": "^26.0.0"
+  },
+  "build": {
+    "appId": "fr.projethub.desktop",
+    "publish": null,
+    "files": ["index.html", "style.css", "app.js", "desktop/*.cjs"],
+    "win": { "target": "nsis", "signAndEditExecutable": false },
+    "nsis": { "oneClick": false, "perMachine": false, "createDesktopShortcut": true }
+  }
+}
