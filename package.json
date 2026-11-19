@@ -1,7 +1,7 @@
 {
   "name": "projet-hub",
   "productName": "Projet Hub",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "Application locale de gestion de projets",
   "main": "desktop/main.cjs",
@@ -20,8 +20,20 @@
   "build": {
     "appId": "fr.projethub.desktop",
     "publish": null,
-    "files": ["index.html", "style.css", "app.js", "desktop/*.cjs"],
-    "win": { "target": "nsis", "signAndEditExecutable": false },
-    "nsis": { "oneClick": false, "perMachine": false, "createDesktopShortcut": true }
+    "files": [
+      "index.html",
+      "style.css",
+      "app.js",
+      "desktop/*.cjs"
+    ],
+    "win": {
+      "target": "nsis",
+      "signAndEditExecutable": false
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "createDesktopShortcut": true
+    }
   }
 }
