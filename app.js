@@ -39,7 +39,8 @@ const activityLabels = {
   taskCompleted: "Tâche terminée",
   noteAdded: "Note ajoutée",
   fileAdded: "Fichier ajouté",
-  codexLaunched: "Codex lancé"
+  codexLaunched: "Codex lancé",
+  taskCodexLaunched: "Session Codex lancée depuis une tâche"
 };
 const main = document.querySelector("#main");
 const dialog = document.querySelector("#dialog");
@@ -52,12 +53,24 @@ let storageAvailable = true;
 let pendingAction;
 let toastTimeout;
 let successMessage;
+const activeTaskCodex = new Set();
+const unsavedCodexResults = new Map();
+const codexResultLabels = {
+  completed: "Codex indique que la demande a été accomplie.",
+  incomplete: "Codex indique que le travail reste incomplet.",
+  failed: "La session Codex a échoué.",
+  interrupted: "La session Codex s’est arrêtée avant de fournir un résultat final.",
+  unconfirmed: "Codex a répondu sans confirmer l’état de la tâche."
+};
+const taskFilters = { deadline: "Toutes", status: "Tous", priority: "Toutes", sort: "Échéance" };
 
 try {
   const saved = localStorage.getItem(storageKey);
   lastProjectId = localStorage.getItem(lastProjectKey);
   if (saved) {
-    projects = JSON.parse(saved);
+    const state = readState(saved);
+    projects = state.projects;
+    lastProjectId = state.lastProjectId;
   } else {
     const now = new Date().toISOString();
     projects = [
@@ -92,9 +105,9 @@ function safeUrl(value) {
 }
 
 function route() {
-  const [, id, section] = location.hash.split("/");
+  const [page, id, section, anchor] = location.hash.split("/");
   const project = projects.find(item => item.id === id);
-  return { project, section: Object.hasOwn(pages, section) ? section : "tableau" };
+  return { project, anchor, settings: page === "#parametres", section: Object.hasOwn(pages, section) ? section : "tableau" };
 }
 
 function projectUrl(project, section = "tableau") {
@@ -164,23 +177,130 @@ function home() {
       ${stat("◷", "gold", projects.filter(project => project.status === "En cours").length, "En cours")}
       ${stat("✓", "blue", projects.filter(project => project.status === "Terminé").length, "Terminés")}
     </section>
+    <section class="panel">
+      <label>Rechercher dans Projet Hub<input type="search" id="global-search" placeholder="Projet, tâche, note, lien…" autocomplete="off" aria-controls="search-results"></label>
+      <div id="search-results" aria-live="polite"></div>
+    </section>
+    ${deadlineSummary()}
     <div class="section-heading"><h2>Tous les projets</h2><div class="card-actions">
-      ${button("backup-export", "Exporter les projets")}
-      ${windows ? button("backup-import", "Importer des projets") : ""}
+      <a class="button secondary" href="#parametres">Sauvegarde et restauration</a>
     </div></div>
     <section class="project-grid" aria-label="Tous les projets">
       ${sorted.length ? sorted.map(projectCard).join("") : empty("Créez votre premier projet avec le bouton « Nouveau projet ».")}
     </section>`;
 }
 
-function taskCard(task) {
-  return `<article class="panel">
+function settingsPage() {
+  return `<div class="page-heading"><h1>Paramètres</h1></div>
+    <section class="panel"><h2>Sauvegarde et restauration</h2>
+      <p>La sauvegarde JSON contient vos projets, leurs pièces jointes et vos paramètres. Les dossiers de code sont référencés par leur chemin.</p>
+      <p>${windows ? "Vous choisissez où enregistrer le fichier." : "Le fichier est enregistré dans les téléchargements de votre navigateur ou à l’emplacement que vous choisissez."}
+        Pour restaurer vos données sur un autre PC, copiez le fichier JSON, puis ouvrez ces paramètres et choisissez « Importer une sauvegarde ».</p>
+      <div class="actions">${button("backup-export", "Exporter une sauvegarde", "", "primary")}
+        ${button("backup-import", "Importer une sauvegarde")}</div>
+      <p id="backup-location" class="wrap" role="status" hidden></p>
+    </section>`;
+}
+
+function searchText(value) {
+  return String(value ?? "").normalize("NFD").replace(/\p{Diacritic}/gu, "").toLocaleLowerCase("fr");
+}
+
+function searchResults(query) {
+  const words = searchText(query).trim().split(/\s+/).filter(Boolean);
+  if (!words.length) return "";
+  const results = [];
+  const collections = [
+    ["tasks", "taches", "Tâche"], ["notes", "fichiers", "Note"],
+    ["discussions", "discussions", "Discussion"], ["tools", "outils", "Lien"],
+    ["files", "fichiers", "Fichier"]
+  ];
+  for (const project of projects) {
+    const add = (section, label, title, details, anchor = "") => {
+      const searchable = searchText([title, ...details].join(" "));
+      if (words.every(word => searchable.includes(word))) {
+        results.push(`<li><a href="${projectUrl(project, section)}${anchor}">${escapeHtml(title)}</a>
+          <span class="muted"> · ${label}${section === "tableau" ? "" : " · " + escapeHtml(project.name)}</span></li>`);
+      }
+    };
+    add("tableau", "Projet", project.name, [project.description, project.status, project.type, project.folderReference]);
+    for (const [collection, section, label] of collections) {
+      for (const item of project[collection]) {
+        add(section, label, item.title, [item.description, item.content, item.url, item.codexInstructions], `/${collection}-${item.id}`);
+      }
+    }
+    for (const url of project.context?.links ?? []) add("contexte", "Lien", url, []);
+    if (project.context?.repository) add("contexte", "Dépôt GitHub", project.context.repository, []);
+  }
+  return results.length ? `<ul class="result-list">${results.join("")}</ul>` : empty("Aucun résultat ne correspond à cette recherche.");
+}
+
+function validDeadline(value) {
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value) || value.startsWith("0000")) return false;
+  const date = new Date(value);
+  return Number.isFinite(date.valueOf()) && date.toISOString().slice(0, 10) === value;
+}
+
+function localToday() {
+  const now = new Date();
+  return [now.getFullYear(), now.getMonth() + 1, now.getDate()].map((part, index) =>
+    String(part).padStart(index === 0 ? 4 : 2, "0")).join("-");
+}
+
+function deadlineGroup(deadline, today) {
+  if (!validDeadline(deadline)) return "Sans échéance";
+  if (deadline < today) return "En retard";
+  return deadline === today ? "Aujourd’hui" : "À venir";
+}
+
+const deadlineGroups = ["En retard", "Aujourd’hui", "À venir", "Sans échéance"];
+const deadlineFormat = new Intl.DateTimeFormat("fr-FR", { dateStyle: "medium", timeZone: "UTC" });
+
+function compareDeadlines(first, second) {
+  return (first.deadline || "9999-99-99").localeCompare(second.deadline || "9999-99-99");
+}
+
+function deadlineSummary() {
+  const today = localToday();
+  const dated = projects.flatMap(project => project.tasks
+    .filter(task => task.status !== "Terminé" && validDeadline(task.deadline))
+    .map(task => ({ project, task }))).sort((a, b) => compareDeadlines(a.task, b.task));
+  return `<section class="panel"><h2>Échéances des tâches</h2>
+    <div class="deadline-grid">${deadlineGroups.slice(0, 3).map(label => {
+      const items = dated.filter(({ task }) => deadlineGroup(task.deadline, today) === label);
+      return `<div><h3>${label} ${badge(items.length)}</h3>
+        ${items.length ? `<ul class="result-list">${items.map(({ project, task }) =>
+          `<li><a href="${projectUrl(project, "taches")}/tasks-${task.id}">${escapeHtml(task.title)}</a>
+            <span class="muted"> · ${escapeHtml(project.name)} · ${deadlineFormat.format(new Date(task.deadline))}</span></li>`).join("")}</ul>`
+          : '<p class="muted">Aucune tâche.</p>'}</div>`;
+    }).join("")}</div>
+  </section>`;
+}
+
+function taskCard(project, task) {
+  const key = project.id + "/" + task.id;
+  const running = activeTaskCodex.has(key);
+  const result = unsavedCodexResults.get(key) ?? task.codexResult;
+  const actions = result?.pending && !running ? `<div class="actions">
+    ${button("tasks-codexcomplete", "Marquer comme terminée", task.id, result.state === "completed" ? "primary" : "secondary")}
+    ${button("tasks-codexkeep", "Laisser en cours", task.id, result.state === "completed" ? "secondary" : "primary")}
+  </div>` : "";
+  const report = result && !running ? `<details ${result.pending ? "open" : ""}>
+    <summary>Résultat Codex</summary>
+    <p class="muted">${codexResultLabels[result.state]}</p>
+    ${result.summary ? `<p class="wrap">${escapeHtml(result.summary)}</p>` : ""}
+    ${actions}
+  </details>` : "";
+  return `<article class="panel" id="tasks-${task.id}" tabindex="-1">
     <div class="item-top"><h3>${escapeHtml(task.title)}</h3><div class="tags">
       ${statusBadge(task.status)}${badge(`Priorité ${task.priority.toLowerCase()}`, task.priority === "Haute" ? "red" : "")}
     </div></div>
+    ${validDeadline(task.deadline) ? `<p class="muted">Échéance · <time datetime="${task.deadline}">${deadlineFormat.format(new Date(task.deadline))}</time></p>` : ""}
     ${task.description ? `<p class="muted wrap">${escapeHtml(task.description)}</p>` : ""}
+    ${running ? '<p class="muted" role="status">Session Codex en cours…</p>' : report}
     <div class="form-actions">
-      ${task.status !== "Terminé" ? button("tasks-complete", "Terminer", task.id) : ""}
+      ${windows && !running && !result?.pending ? button("tasks-codex", "Travailler avec Codex", task.id) : ""}
+      ${task.status !== "Terminé" && !result?.pending ? button("tasks-complete", "Terminer", task.id) : ""}
       ${button("tasks-edit", "Modifier", task.id)}
       ${button("tasks-delete", "Supprimer", task.id, "secondary danger")}
     </div>
@@ -218,17 +338,33 @@ function dashboard(project) {
       <p class="muted">${completed} / ${project.tasks.length} tâches terminées</p>
     </section>
     <div class="section-heading"><h2>Tâches importantes</h2><a class="button secondary" href="${projectUrl(project, "taches")}">Voir les tâches →</a></div>
-    <div class="stack">${important.map(taskCard).join("") || empty("Aucune tâche de priorité haute à terminer.")}</div>
+    <div class="stack">${important.map(task => taskCard(project, task)).join("") || empty("Aucune tâche de priorité haute à terminer.")}</div>
     ${recentActivity(project)}`;
 }
 
+function taskList(project, anchor) {
+  const today = localToday();
+  const tasks = project.tasks.filter(task =>
+    anchor === `tasks-${task.id}` ||
+    ((taskFilters.deadline === "Toutes" || deadlineGroup(task.deadline, today) === taskFilters.deadline) &&
+     (taskFilters.status === "Tous" || task.status === taskFilters.status) &&
+     (taskFilters.priority === "Toutes" || task.priority === taskFilters.priority)));
+  const comparators = {
+    Échéance: compareDeadlines,
+    Statut: (a, b) => taskStatuses.indexOf(a.status) - taskStatuses.indexOf(b.status),
+    Priorité: (a, b) => priorities.indexOf(b.priority) - priorities.indexOf(a.priority)
+  };
+  tasks.sort(comparators[taskFilters.sort]);
+  return tasks.map(task => taskCard(project, task)).join("") || empty("Aucune tâche ne correspond aux filtres.");
+}
+
 function tasksPage(project) {
-  return taskStatuses.map(status => {
-    const tasks = project.tasks.filter(task => task.status === status);
-    return `<section class="group"><h2>${status} ${badge(tasks.length)}</h2><div class="stack">
-      ${tasks.map(taskCard).join("") || empty("Aucune tâche dans cette catégorie.")}
-    </div></section>`;
-  }).join("");
+  return `<div class="panel deadline-grid" id="task-filters">
+    ${field("deadline", "Échéance", taskFilters.deadline, { choices: ["Toutes", ...deadlineGroups] })}
+    ${field("status", "Statut", taskFilters.status, { choices: ["Tous", ...taskStatuses] })}
+    ${field("priority", "Priorité", taskFilters.priority, { choices: ["Toutes", ...priorities] })}
+    ${field("sort", "Trier par", taskFilters.sort, { choices: ["Échéance", "Statut", "Priorité"] })}
+  </div><div class="stack" id="task-list" aria-live="polite">${taskList(project, route().anchor)}</div>`;
 }
 
 function itemList(items, collection, message) {
@@ -244,7 +380,7 @@ function itemList(items, collection, message) {
       content = `<p class="muted">${new Intl.NumberFormat("fr-FR").format(item.size)} octets</p>`;
       extra = button("files-download", "Télécharger", item.id);
     }
-    return `<article class="panel"><h3>${title}</h3>${content}<div class="form-actions">
+    return `<article class="panel" id="${collection}-${item.id}" tabindex="-1"><h3>${title}</h3>${content}<div class="form-actions">
       ${extra}${button(`${collection}-delete`, "Supprimer", item.id, "secondary danger")}
     </div></article>`;
   }).join("") || empty(message)}</div>`;
@@ -322,6 +458,10 @@ function projectPage(project, section) {
       () => `<section class="panel"><h2>Informations du projet</h2><p class="muted wrap">${escapeHtml(project.name)} · ${escapeHtml(project.status)}</p>
         <div class="form-actions">${button("project-edit", "Modifier le projet", project.id, "primary")}
         ${button("project-delete", "Supprimer le projet", project.id, "secondary danger")}</div></section>
+        ${project.folderReference ? `<section class="panel"><h2>Dossier référencé dans la sauvegarde</h2>
+          <p class="muted wrap">${escapeHtml(project.folderReference)}</p>
+          ${windows ? "<p>Utilisez « Associer un dossier existant » pour choisir son emplacement sur ce PC.</p>" : ""}
+        </section>` : ""}
         ${windows ? `<section class="panel">
           <h2>Dossier du projet sur le PC</h2>
           <p id="project-folder" class="muted wrap" role="status">Chargement du dossier…</p>
@@ -334,17 +474,18 @@ function projectPage(project, section) {
 }
 
 function render() {
-  const { project, section } = route();
+  const { project, section, settings } = route();
   document.title = project ? `${pages[section][0]} · ${project.name} · Projet Hub` : "Projet Hub";
   document.querySelector("#sidebar").innerHTML = `<a class="brand" href="#accueil"><span class="brand-mark" aria-hidden="true">▦</span>Projet Hub</a>
     <p class="nav-label">Espace de travail</p>
-    <nav aria-label="Navigation principale">${navLink("#accueil", "Mes projets", "▣", !project)}
+    <nav aria-label="Navigation principale">${navLink("#accueil", "Mes projets", "▣", !project && !settings)}
+      ${navLink("#parametres", "Paramètres", pages.parametres[1], settings)}
       ${project ? Object.entries(pages).map(([key, [label, icon]]) => navLink(projectUrl(project, key), label, icon, key === section)).join("") : ""}
     </nav><p class="sidebar-foot">Données sur cet appareil</p>`;
   document.querySelector("#topbar").innerHTML = project
     ? `<a href="#accueil">Mes projets</a><span aria-hidden="true">›</span><strong>${escapeHtml(project.name)}</strong>`
-    : `<strong>Espace de travail</strong><span aria-hidden="true">›</span><span>Mes projets</span>`;
-  main.innerHTML = project ? projectPage(project, section) : home();
+    : `<strong>Espace de travail</strong><span aria-hidden="true">›</span><span>${settings ? "Paramètres" : "Mes projets"}</span>`;
+  main.innerHTML = project ? projectPage(project, section) : settings ? settingsPage() : home();
   const folder = document.querySelector("#project-folder");
   if (project && folder) void updateFolder(project.id, folder);
   const contextStatus = document.querySelector("#context-status");
@@ -353,34 +494,47 @@ function render() {
 
 function rememberOpenProject() {
   const { project } = route();
-  if (!project) return;
-  lastProjectId = project.id;
+  if (!project || project.id === lastProjectId) return;
   try {
-    localStorage.setItem(lastProjectKey, lastProjectId);
+    changeProjects(() => project.id);
   } catch {
     // Keep the current session usable when storage is unavailable.
   }
 }
 
-function notify(message) {
+function notify(message, url) {
   const toast = document.querySelector("#toast");
   clearTimeout(toastTimeout);
   toast.textContent = message;
+  if (url) {
+    const link = document.createElement("a");
+    link.href = url;
+    link.textContent = " Voir la tâche";
+    toast.append(link);
+  }
   toast.hidden = false;
   toastTimeout = setTimeout(() => { toast.hidden = true; }, 3800);
+}
+
+function readState(saved) {
+  const state = JSON.parse(saved);
+  return Array.isArray(state) ? { projects: state, lastProjectId: localStorage.getItem(lastProjectKey) } : state;
 }
 
 function changeProjects(change) {
   if (!storageAvailable) throw new Error("Le stockage du navigateur est inaccessible.");
   const saved = localStorage.getItem(storageKey);
-  const next = saved ? JSON.parse(saved) : structuredClone(projects);
-  change(next);
+  const state = saved ? readState(saved) : { projects, lastProjectId };
+  const next = structuredClone(state.projects);
+  const nextLast = change(next, state.lastProjectId) ?? state.lastProjectId;
+  const selected = next.some(project => project.id === nextLast) ? nextLast : null;
   try {
-    localStorage.setItem(storageKey, JSON.stringify(next));
+    localStorage.setItem(storageKey, JSON.stringify({ projects: next, lastProjectId: selected }));
   } catch {
     throw new Error("Enregistrement impossible. Vérifiez l’espace disponible dans ce navigateur.");
   }
   projects = next;
+  lastProjectId = selected;
 }
 
 function field(name, label, value = "", options = {}) {
@@ -527,19 +681,42 @@ function fileData(file) {
   });
 }
 
-function downloadBackup() {
+async function downloadBackup(state = { projects, lastProjectId }, recovery = false) {
   if (!storageAvailable) throw new Error("Les données locales sont inaccessibles.");
-  const backup = { format: "projet-hub", version: 1, projects };
-  const url = URL.createObjectURL(new Blob([JSON.stringify(backup)], { type: "application/json" }));
+  const portable = await Promise.all(state.projects.map(async project => {
+    const folderReference = (windows && await windowsAction("folder", project.id)) || project.folderReference;
+    return { ...project, folderReference };
+  }));
+  const backup = {
+    format: "projet-hub", version: 2, projects: portable,
+    settings: { lastProjectId: portable.some(project => project.id === state.lastProjectId) ? state.lastProjectId : null }
+  };
+  const content = JSON.stringify(backup);
+  const filename = `projet-hub-${recovery ? "avant-restauration-" : ""}${localToday()}.json`;
+  if (windows) {
+    const path = await windowsAction("saveBackup", filename, content);
+    if (path) {
+      const status = document.querySelector("#backup-location");
+      if (status) {
+        status.textContent = `Sauvegarde enregistrée dans ${path}`;
+        status.hidden = false;
+      }
+      notify(`Sauvegarde enregistrée dans ${path}`);
+    }
+    return Boolean(path);
+  }
+  const url = URL.createObjectURL(new Blob([content], { type: "application/json" }));
   const link = document.createElement("a");
   link.href = url;
-  link.download = `projet-hub-${new Date().toISOString().slice(0, 10)}.json`;
+  link.download = filename;
   link.click();
   setTimeout(() => URL.revokeObjectURL(url), 30000);
+  notify(`Téléchargement lancé pour ${filename}.`);
+  return true;
 }
 
 function readBackup(backup) {
-  if (backup?.format !== "projet-hub" || backup.version !== 1 || !Array.isArray(backup.projects)) {
+  if (backup?.format !== "projet-hub" || ![1, 2].includes(backup.version) || !Array.isArray(backup.projects)) {
     throw new Error("Ce fichier n’est pas une sauvegarde Projet Hub compatible.");
   }
   const schemas = {
@@ -571,15 +748,48 @@ function readBackup(backup) {
       return { id: item.id, ...convert(item) };
     });
   }
-  return unique(backup.projects, project => {
+  const imported = unique(backup.projects, project => {
     const fields = validate(project, {
       name: "string", description: "string", status: projectStatuses,
       updated: value => typeof value === "string" && Number.isFinite(Date.parse(value))
     });
     fields.updated = new Date(fields.updated).toISOString();
+    if (project.folderReference !== undefined) {
+      Object.assign(fields, validate(project, {
+        folderReference: value => typeof value === "string" && value.length <= 32767 && !value.includes("\0")
+      }));
+    }
     if (project.type !== undefined) Object.assign(fields, validate(project, { type: projectTypes }));
     for (const [collection, schema] of Object.entries(schemas)) {
-      fields[collection] = unique(project[collection], item => validate(item, { title: "string", ...schema }));
+      fields[collection] = unique(project[collection], item => {
+        const entry = validate(item, { title: "string", ...schema });
+        if (collection === "tasks" && item.deadline !== undefined && item.deadline !== "") {
+          Object.assign(entry, validate(item, { deadline: validDeadline }));
+        }
+        if (collection === "tasks" && item.codexInstructions !== undefined) {
+          Object.assign(entry, validate(item, {
+            codexInstructions: value => typeof value === "string" && value.length <= 4000 && !value.includes("\0")
+          }));
+        }
+        if (collection === "tasks" && item.codexResult !== undefined) {
+          entry.codexResult = validate(item.codexResult, {
+            state: Object.keys(codexResultLabels),
+            summary: value => typeof value === "string" && value.length <= 4000,
+            pending: "boolean"
+          });
+        }
+        if (collection === "files") {
+          const encoded = entry.data.slice(entry.data.indexOf(",") + 1);
+          let decodedSize;
+          try {
+            decodedSize = atob(encoded).length;
+          } catch {
+            throw new Error("La sauvegarde contient une pièce jointe illisible.");
+          }
+          if (decodedSize !== entry.size) throw new Error("La sauvegarde contient une pièce jointe de taille incorrecte.");
+        }
+        return entry;
+      });
     }
     fields.activity = unique(project.activity === undefined ? [] : project.activity, item => {
       const event = validate(item, {
@@ -602,41 +812,106 @@ function readBackup(backup) {
     }
     return fields;
   });
+  const lastProjectId = backup.version === 2 ? backup.settings?.lastProjectId : null;
+  if (backup.version === 2 && lastProjectId !== null && !imported.some(project => project.id === lastProjectId)) {
+    throw new Error("Le dernier projet ouvert indiqué dans la sauvegarde est invalide.");
+  }
+  return { projects: imported, lastProjectId };
+}
+
+function mergeBackup(next, imported) {
+  const ids = new Map();
+  const signature = project => {
+    const [{ id, folderReference, ...content }] = readBackup({ format: "projet-hub", version: 1, projects: [project] }).projects;
+    return JSON.stringify(content);
+  };
+  const byId = new Map(next.map(project => [project.id, project]));
+  const byContent = new Map(next.map(project => [signature(project), project]));
+  for (const project of imported) {
+    const key = signature(project);
+    const sameId = byId.get(project.id);
+    const match = sameId && (signature(sameId) === key || sameId.name === project.name || project.id.includes("-")) ? sameId : byContent.get(key);
+    if (match) {
+      ids.set(project.id, match.id);
+      match.folderReference ||= project.folderReference;
+      match.context ??= project.context;
+      for (const collection of [...Object.keys(entries), "activity"]) {
+        const items = match[collection] ??= [];
+        const existingIds = new Set(items.map(item => item.id));
+        items.push(...project[collection].filter(item => !existingIds.has(item.id)));
+      }
+      byContent.set(signature(match), match);
+    } else {
+      const addition = { ...project, id: sameId ? crypto.randomUUID() : project.id };
+      next.push(addition);
+      byId.set(addition.id, addition);
+      byContent.set(key, addition);
+      ids.set(project.id, addition.id);
+    }
+  }
+  return ids;
 }
 
 function importProjects() {
-  showForm("Importer des projets", `<p>Les projets de la sauvegarde seront ajoutés à ceux de cet appareil.</p>
-    <label>Sauvegarde Projet Hub<input name="backup" type="file" accept=".json,application/json" required></label>`,
-  async data => {
-    const file = data.get("backup");
-    if (!file?.name || file.size > 32 * 1024 * 1024) throw new Error("Choisissez une sauvegarde JSON de 32 Mio maximum.");
-    let backup;
-    try {
-      backup = JSON.parse(await file.text());
-    } catch {
-      throw new Error("Impossible de lire cette sauvegarde JSON.");
-    }
-    const imported = readBackup(backup);
-    const existing = readBackup({ format: "projet-hub", version: 1, projects });
-    const signature = ({ id, ...content }) => JSON.stringify(content);
-    const known = new Map();
-    for (const project of existing) {
-      const key = signature(project);
-      known.set(key, (known.get(key) ?? 0) + 1);
-    }
-    const additions = imported.filter(project => {
-      const key = signature(project);
-      const copies = known.get(key) ?? 0;
-      if (copies === 0) return true;
-      known.set(key, copies - 1);
+  showForm("Importer une sauvegarde",
+    '<label>Sauvegarde Projet Hub<input name="backup" type="file" accept=".json,application/json" required></label>',
+    async data => {
+      const file = data.get("backup");
+      if (!file?.name || file.size > 32 * 1024 * 1024) throw new Error("Choisissez une sauvegarde JSON de 32 Mio maximum.");
+      let backup;
+      try {
+        backup = JSON.parse(await file.text());
+      } catch {
+        throw new Error("Impossible de lire cette sauvegarde JSON.");
+      }
+      const imported = readBackup(backup);
+      const counts = Object.keys(entries).map(key => imported.projects.reduce((total, project) => total + project[key].length, 0));
+      const folders = imported.projects.filter(project => project.folderReference).length;
+      const labels = ["tâches", "liens", "notes", "discussions", "pièces jointes"];
+      dialog.close();
+      showForm("Confirmer la restauration", `<p class="wrap"><strong>${escapeHtml(file.name)}</strong></p>
+        <p>${imported.projects.length} projet(s) · ${counts.map((count, index) => count + " " + labels[index]).join(" · ")}
+        · ${folders} dossier(s) référencé(s)</p>
+        ${imported.lastProjectId ? "<p>La sauvegarde indique aussi le dernier projet ouvert.</p>" : ""}
+        <p class="muted">La fusion conserve les éléments présents en cas de conflit. Le remplacement crée d’abord une sauvegarde de récupération.</p>
+        ${field("mode", "Mode de restauration", "Fusionner les projets", { choices: ["Fusionner les projets", "Remplacer les données actuelles"] })}`,
+        async selection => {
+          if (dataText(selection, "mode") === "Remplacer les données actuelles") {
+            const before = localStorage.getItem(storageKey);
+            const state = before ? readState(before) : { projects, lastProjectId };
+            if (!await downloadBackup(state, true)) return false;
+            const restore = () => {
+              if (before !== localStorage.getItem(storageKey)) {
+                throw new Error("Les données ont changé pendant la sauvegarde. Relancez la restauration.");
+              }
+              changeProjects(next => {
+                next.splice(0, next.length, ...imported.projects);
+                return imported.lastProjectId || "";
+              });
+              successMessage = "Données restaurées. Retrouvez la sauvegarde de récupération dans le fichier projet-hub-avant-restauration.";
+            };
+            if (!windows) {
+              dialog.close();
+              showForm("Remplacer les données actuelles",
+                '<p>Vérifiez que le téléchargement du fichier projet-hub-avant-restauration est terminé et que vous pouvez le retrouver.</p><label class="check-field"><input type="checkbox" required> La sauvegarde de récupération est enregistrée.</label>',
+                restore);
+              document.querySelector("#submit").textContent = "Remplacer les données";
+              return false;
+            }
+            restore();
+          } else {
+            changeProjects((next, selected) => {
+              if (!imported.projects.length) return selected;
+              const ids = mergeBackup(next, imported.projects);
+              return selected || ids.get(imported.lastProjectId) || "";
+            });
+            successMessage = "Fusion terminée.";
+          }
+        });
+      document.querySelector("#submit").textContent = "Restaurer";
       return false;
     });
-    if (additions.length) {
-      changeProjects(next => next.push(...additions.map(project => ({ ...project, id: crypto.randomUUID() }))));
-    }
-    successMessage = additions.length ? `Projets importés : ${additions.length}.` : "Aucun nouveau projet à importer.";
-  });
-  document.querySelector("#submit").textContent = "Importer";
+  document.querySelector("#submit").textContent = "Vérifier le fichier";
 }
 
 async function windowsAction(method, ...args) {
@@ -843,12 +1118,99 @@ function changeEntry(project, collection, change) {
   });
 }
 
+function updateCodexTask(project, taskId, update) {
+  changeEntry(project, "tasks", (tasks, currentProject) => {
+    const current = tasks.find(task => task.id === taskId);
+    if (!current) throw new Error("Cette tâche a déjà été supprimée.");
+    update(current, currentProject);
+  });
+}
+
+async function workWithCodex(project, task) {
+  const key = project.id + "/" + task.id;
+  if (activeTaskCodex.has(key) || task.codexResult?.pending || unsavedCodexResults.has(key)) return;
+  if (!storageAvailable) {
+    notify("Le stockage des projets est inaccessible.");
+    return;
+  }
+  activeTaskCodex.add(key);
+  render();
+  const taskUrl = `${projectUrl(project, "taches")}/tasks-${task.id}`;
+  try {
+    const session = await windowsAction("openTaskCodex", project.id, task.id, {
+      title: task.title, description: task.description, instructions: task.codexInstructions ?? ""
+    });
+    const waiting = windowsAction("taskCodexResult", project.id, task.id, session.id);
+    let activityId;
+    try {
+      updateCodexTask(project, task.id, (current, currentProject) => {
+        current.status = "En cours";
+        addActivity(currentProject, "taskCodexLaunched", current.title, session.at);
+        activityId = currentProject.activity[0].id;
+      });
+      notify("Session Codex lancée.", taskUrl);
+    } catch (error) {
+      activityId = undefined;
+      notify(`Codex a démarré. ${error.message}`, taskUrl);
+    }
+    if (route().project?.id === project.id) render();
+    const result = await waiting;
+    const review = { ...result, pending: true };
+    try {
+      updateCodexTask(project, task.id, (current, currentProject) => {
+        if (activityId && !currentProject.activity?.some(event => event.id === activityId)) {
+          throw new Error("La tâche a changé depuis le lancement.");
+        }
+        current.codexResult = review;
+      });
+      notify("Résultat Codex disponible.", taskUrl);
+    } catch (error) {
+      const currentProject = projects.find(item => item.id === project.id);
+      if (currentProject?.tasks.some(item => item.id === task.id) &&
+          (!activityId || currentProject.activity?.some(event => event.id === activityId))) {
+        unsavedCodexResults.set(key, review);
+        notify(`Résultat Codex disponible pour cette ouverture. ${error.message}`, taskUrl);
+      } else {
+        notify(`Session Codex terminée. ${error.message}`);
+      }
+    }
+  } catch (error) {
+    notify(error.message);
+  } finally {
+    activeTaskCodex.delete(key);
+    if (route().project?.id === project.id) render();
+  }
+}
+
+function reviewCodexTask(project, taskId, complete) {
+  const key = project.id + "/" + taskId;
+  if (activeTaskCodex.has(key)) return;
+  try {
+    updateCodexTask(project, taskId, (task, currentProject) => {
+      const result = unsavedCodexResults.get(key) ?? task.codexResult;
+      if (!result?.pending) return;
+      if (complete && task.status !== "Terminé") {
+        addActivity(currentProject, "taskCompleted", task.title, currentProject.updated);
+      }
+      task.status = complete ? "Terminé" : "En cours";
+      task.codexResult = { ...result, pending: false };
+    });
+    unsavedCodexResults.delete(key);
+    render();
+    notify(complete ? "Tâche terminée." : "Tâche laissée en cours.");
+  } catch (error) {
+    notify(error.message);
+  }
+}
+
 function editEntry(project, collection, item) {
   let fields = field("title", "Titre", item?.title);
   if (collection === "tasks") {
     fields += field("description", "Description", item?.description, { type: "textarea", required: false, limit: 4000 }) +
+      field("codexInstructions", "Consignes pour Codex (facultatives)", item?.codexInstructions, { type: "textarea", required: false, limit: 4000 }) +
       field("priority", "Priorité", item?.priority ?? "Normale", { choices: priorities }) +
-      field("status", "Statut", item?.status, { choices: taskStatuses });
+      field("status", "Statut", item?.status, { choices: taskStatuses }) +
+      field("deadline", "Date limite (facultative)", item?.deadline, { type: "date", required: false });
   } else if (collection === "tools") {
     fields += field("type", "Type de lien", item?.type, { choices: toolTypes }) +
       field("url", "Adresse du lien", item?.url, { type: "url", limit: 4000 });
@@ -869,8 +1231,11 @@ function editEntry(project, collection, item) {
       values.title = requiredText(data, "title", "Titre");
       if (collection === "tasks") {
         values.description = dataText(data, "description");
+        values.codexInstructions = dataText(data, "codexInstructions");
         values.priority = dataText(data, "priority");
         values.status = dataText(data, "status");
+        values.deadline = dataText(data, "deadline");
+        if (values.deadline && !validDeadline(values.deadline)) throw new Error("Saisissez une date limite valide.");
       } else if (collection === "tools") {
         values.type = dataText(data, "type");
         values.url = safeUrl(dataText(data, "url"));
@@ -924,8 +1289,8 @@ document.addEventListener("click", event => {
     editContext(project, action === "link");
   } else if (collection === "backup") {
     try {
-      if (action === "export") downloadBackup();
-      if (action === "import" && windows) importProjects();
+      if (action === "export") void downloadBackup().catch(error => notify(error.message));
+      if (action === "import") importProjects();
     } catch (error) {
       notify(error.message);
     }
@@ -948,6 +1313,10 @@ document.addEventListener("click", event => {
       confirmDelete(entries[collection][2], "", () => {
         changeEntry(project, collection, items => removeItem(items, id));
       });
+    } else if (collection === "tasks" && action === "codex" && windows) {
+      void workWithCodex(project, item);
+    } else if (collection === "tasks" && (action === "codexcomplete" || action === "codexkeep")) {
+      reviewCodexTask(project, item.id, action === "codexcomplete");
     } else if (action === "complete") {
       try {
         changeEntry(project, collection, (items, currentProject) => {
@@ -995,22 +1364,55 @@ form.addEventListener("submit", async event => {
   }
 });
 
+document.addEventListener("input", event => {
+  if (event.target.id === "global-search") {
+    document.querySelector("#search-results").innerHTML = searchResults(event.target.value);
+  }
+});
+
+document.addEventListener("change", event => {
+  if (!event.target.closest("#task-filters")) return;
+  taskFilters[event.target.name] = event.target.value;
+  const { project } = route();
+  document.querySelector("#task-list").innerHTML = taskList(project);
+});
+
+function focusResult() {
+  const { anchor } = route();
+  const result = anchor && document.getElementById(anchor);
+  if (result) {
+    result.focus({ preventScroll: true });
+    result.scrollIntoView({ block: "center" });
+  }
+}
+
+document.addEventListener("keydown", event => {
+  if (!(event.ctrlKey || event.metaKey) || event.altKey || event.key.toLowerCase() !== "k" || dialog.open) return;
+  event.preventDefault();
+  if (!document.querySelector("#global-search")) {
+    window.addEventListener("hashchange", () => document.querySelector("#global-search")?.focus(), { once: true });
+    location.hash = "#accueil";
+  } else {
+    document.querySelector("#global-search").focus();
+  }
+});
+
 window.addEventListener("hashchange", () => {
   rememberOpenProject();
   render();
   window.scrollTo(0, 0);
+  focusResult();
 });
 window.addEventListener("storage", event => {
-  if (event.key === lastProjectKey) {
-    lastProjectId = event.newValue;
-    if (!route().project) render();
-  }
   if (event.key === storageKey && event.newValue) {
-    projects = JSON.parse(event.newValue);
+    const state = readState(event.newValue);
+    projects = state.projects;
+    lastProjectId = state.lastProjectId;
     if (dialog.open && !document.querySelector("#submit").disabled) dialog.close();
     render();
   }
 });
 rememberOpenProject();
 render();
+focusResult();
 if (!storageAvailable) notify("Les données locales sont inaccessibles. Vérifiez les paramètres de stockage du navigateur.");

@@ -164,3 +164,12 @@ textarea { min-height: 100px; resize: vertical; }
   .stat .tile { width: 29px; height: 29px; flex-basis: 29px; }
 }
 @media (max-width: 480px) { .project-grid { grid-template-columns: 1fr; } }
+
+.deadline-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 150px), 1fr)); gap: 14px; }
+.deadline-grid > * { min-width: 0; }
+.result-list { padding-left: 20px; overflow-wrap: anywhere; }
+.result-list li + li { margin-top: 6px; }
+#task-filters label { margin: 0; }
+#backup-location[hidden] { display: none; }
+.check-field { display: flex; align-items: baseline; gap: 8px; }
+.check-field input { width: auto; }

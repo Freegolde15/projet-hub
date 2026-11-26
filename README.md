@@ -33,17 +33,31 @@ Dans l’application Windows, cliquer sur **Nouveau projet**, puis renseigner le
 
 Si le dossier existe déjà, le dialogue permet de l’ouvrir et de l’associer tel quel, ou de sélectionner un autre emplacement. L’option **Associer un dossier existant** permet également de choisir directement le dossier d’un nouveau projet ou celui d’un projet déjà enregistré, via ses paramètres.
 
-### Transférer les projets du navigateur
+### Sauvegarder et restaurer les données
 
-1. Ouvrir l’adresse habituelle de Projet Hub dans le profil de navigateur qui contient les projets. Sur **Mes projets**, cliquer sur **Exporter les projets**.
-2. Dans l’application Windows, ouvrir **Mes projets** puis **Importer des projets**. Sélectionner le fichier JSON téléchargé et cliquer sur **Importer**.
-3. Vérifier les projets importés, y compris les tâches, discussions, liens, notes et pièces jointes. L’import conserve les projets déjà présents et ignore les copies à contenu identique. Un projet modifié depuis un précédent import est ajouté comme projet distinct. Les dossiers Windows se choisissent sur le PC dans les paramètres de chaque projet.
+1. Ouvrir **Paramètres → Exporter une sauvegarde**. Sous Windows, choisir le dossier de destination. Dans le navigateur, retrouver le fichier JSON dans les téléchargements ou dans le dossier choisi.
+2. Sur l'autre PC, ouvrir **Paramètres → Importer une sauvegarde** et sélectionner le JSON. Après vérification, le résumé indique le contenu du fichier.
+3. Choisir **Fusionner les projets** pour compléter les données locales ou **Remplacer les données actuelles** pour restaurer l'ensemble du fichier. En cas de conflit, la fusion conserve la version locale. Le remplacement demande d'enregistrer d'abord une sauvegarde de récupération.
+
+Le JSON comprend les projets, les pièces jointes, les paramètres et les chemins des dossiers associés. Les dossiers et leurs fichiers de code se transfèrent séparément. Pour retrouver un dossier sur le nouveau PC, utiliser **Paramètres du projet → Associer un dossier existant**. Les anciens exports JSON de Projet Hub restent importables.
+
+### Rechercher et suivre les échéances
+
+La recherche se trouve dans **Mes projets** et s'ouvre aussi avec **Ctrl+K**. Sélectionner un résultat ouvre le projet et la rubrique correspondante.
+
+Dans **Tâches**, renseigner la **Date limite** à la création ou à la modification. Les filtres et le tri couvrent l'échéance, le statut et la priorité. L'accueil récapitule les tâches ouvertes en retard, prévues aujourd'hui et à venir. Le filtre **Sans échéance** retrouve les tâches sans date.
 
 ### Ouvrir Codex
 
 Vérifier dans PowerShell que `codex --version` fonctionne. Au besoin, exécuter `npm.cmd install -g @openai/codex`, ouvrir un nouveau terminal et lancer `codex` pour se connecter. Projet Hub repère `codex.exe` sur le PATH ou dans l’installation npm globale standard.
 
 Sur le tableau de bord d’un projet disposant d’un dossier associé, cliquer sur **Ouvrir Codex**. Le dialogue permet de sélectionner un fichier situé dans le dossier du projet et de saisir une consigne. Le chemin relatif du fichier est transmis à Codex dans la consigne. Les deux champs sont facultatifs. Codex s’ouvre dans une console Windows avec le dossier du projet comme répertoire de travail, en lecture seule avec demandes d’approbation dans la CLI. Projet Hub transmet la consigne comme un argument texte.
+
+### Travailler sur une tâche avec Codex
+
+Dans **Tâches**, le formulaire permet d’ajouter des **Consignes pour Codex**. L’action **Travailler avec Codex** transmet le titre, la description et les consignes à Codex CLI depuis le dossier associé au projet. Cette session s’exécute en arrière-plan, en lecture seule. Le bouton **Ouvrir Codex** du tableau de bord reste disponible pour une session interactive.
+
+Quand Codex démarre, la tâche passe à **En cours** et le lancement apparaît dans l’activité. Laissez Projet Hub ouvert pendant la session. Son résultat et la proposition de Codex sont ensuite consultables sur la tâche, où vous pouvez choisir **Marquer comme terminée** ou **Laisser en cours**.
 
 ### Préparer le contexte d’un projet
 

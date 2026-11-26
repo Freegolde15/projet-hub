@@ -1,11 +1,11 @@
 "use strict";
 
 const { app, BrowserWindow, dialog, ipcMain, net, protocol, shell } = require("electron");
-const { mkdir, readFile, realpath, rename, stat, writeFile } = require("node:fs/promises");
+const { mkdir, readFile, realpath, rename, stat, unlink, writeFile } = require("node:fs/promises");
 const { randomUUID } = require("node:crypto");
 const { join, relative, isAbsolute, win32 } = require("node:path");
 const { pathToFileURL } = require("node:url");
-const { launchCodex } = require("./codex.cjs");
+const { launchCodex, launchTaskCodex } = require("./codex.cjs");
 const { validateProject, writeProjectFiles } = require("./project-files.cjs");
 const { checkRepository, importReferences, listReferences, syncProjectContext } = require("./project-context.cjs");
 const { checkForWindowsUpdate } = require("./updates.cjs");
@@ -15,6 +15,7 @@ const home = origin + "/";
 const assets = new Map([["/", "index.html"], ["/app.js", "app.js"], ["/style.css", "style.css"]]);
 const fileSelections = new Map();
 const contextWrites = new Map();
+const taskSessions = new Map();
 let window;
 
 protocol.registerSchemesAsPrivileged([{
@@ -91,6 +92,25 @@ async function chooseDirectory(title, defaultPath) {
   });
   return result.canceled ? null : realpath(result.filePaths[0]);
 }
+
+handle("backup:save", async (_id, filename, content) => {
+  if (typeof filename !== "string" || !/^projet-hub-(?:avant-restauration-)?\d{4}-\d{2}-\d{2}\.json$/.test(filename) ||
+      typeof content !== "string") throw new Error("Sauvegarde invalide.");
+  const result = await dialog.showSaveDialog(window, {
+    title: "Enregistrer la sauvegarde Projet Hub",
+    defaultPath: join(app.getPath("downloads"), filename),
+    filters: [{ name: "Sauvegarde JSON", extensions: ["json"] }]
+  });
+  if (result.canceled) return null;
+  const temporary = result.filePath + "." + randomUUID() + ".tmp";
+  await writeFile(temporary, content, { encoding: "utf8", flag: "wx" }).then(
+    () => rename(temporary, result.filePath)
+  ).catch(async error => {
+    if (error.code !== "EEXIST") await unlink(temporary).catch(() => {});
+    throw error;
+  });
+  return result.filePath;
+});
 
 handle("project:folder", readFolder);
 handle("project:default-parent", defaultParent);
@@ -190,6 +210,43 @@ handle("project:open-codex", async (id, prompt, token) => {
   await launchCodex(folder, prompt);
   fileSelections.delete(id);
   return prompt;
+});
+
+handle("task:open-codex", async (id, taskId, task) => {
+  if (typeof taskId !== "string" || !/^[a-z0-9-]{1,80}$/.test(taskId) ||
+      !task || !["title", "description", "instructions"].every(key =>
+        typeof task[key] === "string" && task[key].length <= (key === "title" ? 200 : 4000) && !task[key].includes("\0")) ||
+      !task.title.trim()) throw new Error("Les informations de la tâche sont invalides.");
+  const key = id + "/" + taskId;
+  if (taskSessions.has(key)) throw new Error("Une session Codex existe déjà pour cette tâche.");
+  const session = { id: randomUUID() };
+  taskSessions.set(key, session);
+  try {
+    const folder = await projectDirectory(id);
+    Object.assign(session, await launchTaskCodex(folder, {
+      title: task.title, description: task.description, instructions: task.instructions
+    }));
+    return { id: session.id, at: session.at };
+  } catch (error) {
+    taskSessions.delete(key);
+    throw error;
+  }
+});
+
+handle("task:codex-result", async (id, taskId, sessionId) => {
+  if (typeof taskId !== "string" || !/^[a-z0-9-]{1,80}$/.test(taskId)) throw new Error("Tâche invalide.");
+  const key = id + "/" + taskId;
+  const session = taskSessions.get(key);
+  if (!session?.result || session.id !== sessionId) throw new Error("Cette session Codex est introuvable.");
+  try {
+    return await session.result;
+  } finally {
+    if (taskSessions.get(key) === session) taskSessions.delete(key);
+  }
+});
+
+app.on("before-quit", () => {
+  for (const session of taskSessions.values()) session.stop?.();
 });
 
 function createWindow() {
